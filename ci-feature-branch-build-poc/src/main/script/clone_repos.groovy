@@ -3,7 +3,7 @@ import org.kohsuke.github.GitHub
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-// TODO: get the list of KIE repos from the repository-list.txt
+// TODO: get the list of KIE repos from the repository-list.txt ?
 @Field
 def static final List<String> ALL_REPOS = [
         "uberfire",
@@ -26,6 +26,7 @@ def static final List<String> ALL_REPOS = [
         "dashboard-builder",
         "optaplanner-wb",
         "jbpm-dashboard",
+        "optaplanner-wb",
         "kie-docs",
         "kie-wb-distributions",
         "droolsjbpm-build-distribution",
@@ -36,90 +37,91 @@ def static final List<String> ALL_REPOS = [
 static final Logger logger = LoggerFactory.getLogger(getClass())
 
 @Field
-static final String ACCESS_TOKEN = System.getProperty("accessToken")
+static final String ACCESS_TOKEN = System.getProperty("ghAccessToken")
 
 @Field
-static final String USER_OR_ORG = System.getProperty("userOrOrg")
+static final int PR_ID = System.getProperty("ghprbPullId").toInteger()
 
 @Field
-static final String BRANCH = System.getProperty("branch")
+static final String SOURCE_BRANCH = System.getProperty("ghprbSourceBranch")
 
 @Field
-static final String DEFAULT_BRANCH = "master"
+static final String TARGET_BRANCH = System.getProperty("ghprbTargetBranch")
 
 @Field
-static final String START_FROM = System.getProperty("startFrom")
+static final String PR_LINK = System.getProperty("ghprbPullLink")
 
 @Field
 static final File BASEDIR = new File(System.getProperty("basedir"))
+
+@Field
+/** Full repo name -- always needs to include the owner prefix. e.g. not just "uberfire" but "uberfire/uberfire" */
+static final String FULL_REPO_NAME = System.getProperty("ghRepoName")
 
 @Field
 GitHub github = GitHub.connectUsingOAuth(ACCESS_TOKEN)
 
 logArgs()
 
-Map<String, String> reposToClone = gatherReposToClone()
-reposToClone.each {
-    logger.info("Cloning \t$it.key/$it.value")
+def repo = github.getRepository(FULL_REPO_NAME)
+def pr = repo.getPullRequest(PR_ID)
+/** Fork name is the repository where the PR branch resides. It may differ from username of the PR submitter */
+def forkName = pr.getHead().getRepository().getOwner().getLogin()
+def repoName = repo.getName()
+def upstreamRepos = getUpstreamRepos(repoName)
 
-    def proc = "git clone git://www.github.com/$it.key --branch $it.value".execute([], BASEDIR)
+println("Upstream repositories: $upstreamRepos")
+
+// full name -> (branch, traget dir)
+Map <String, Tuple2<String, String>> reposToClone = [:]
+
+upstreamRepos.each { upstreamRepoName ->
+    if (existsBranch("$forkName/$upstreamRepoName", SOURCE_BRANCH)) {
+        reposToClone.put("$forkName/$upstreamRepoName", new Tuple2(SOURCE_BRANCH, new File(BASEDIR, "upstream-repos")))
+    }
+}
+
+println("Cloning repositories:")
+reposToClone.each {
+    cloneRepository(it.key, it.value.first, it.value.second)
+}
+
+////////////////////
+/* Helper methods */
+////////////////////
+def cloneRepository(String fullRepoName, String branch, File dir) {
+    logger.info("Cloning \t$fullRepoName:$branch into $dir")
+    // make sure dir exists
+    dir.mkdirs()
+
+    def proc = "git clone git://github.com/$fullRepoName --branch $branch --depth 10".execute([], dir)
     proc.consumeProcessOutputStream(System.out)
     proc.consumeProcessErrorStream(System.err)
     proc.waitFor()
 }
 
 def logArgs() {
-    logger.info("User or org: $USER_OR_ORG")
-    logger.info("Branch: $BRANCH")
-    logger.info("Start from: $START_FROM")
+    logger.info("PR link: $PR_LINK")
+    logger.info("PR ID: $PR_ID")
+    logger.info("Source branch: $SOURCE_BRANCH")
+    logger.info("Target branch: $TARGET_BRANCH")
     logger.info("Basedir: $BASEDIR")
 }
 
-def gatherReposToClone() {
-    Map<String, String> reposToClone = [:]
-    getReposFrom(START_FROM).each { repoName ->
-        def defaultRepo = getDefaultOrgUnitForRepo(repoName) + "/$repoName"
-        def fork = "$USER_OR_ORG/$repoName"
-        // 1) Check the fork + specified branch
-        // 2) Check the default repo + specified branch
-        // 3) If none above exists, use default repo + default (master) branch
-
-        if (existsBranch(fork, BRANCH)) {
-            reposToClone.put(fork, BRANCH)
-        } else if (existsBranch("$defaultRepo", BRANCH)) {
-            reposToClone.put(defaultRepo, BRANCH)
-        } else {
-            reposToClone.put(defaultRepo, DEFAULT_BRANCH)
-        }
-    }
-    reposToClone
-}
-
-def boolean existsBranch(String repo, String branch) {
-    logger.debug("Checking existance of $repo/$branch")
+def boolean existsBranch(String fullRepoName, String branch) {
+    logger.debug("Checking existance of $fullRepoName:$branch")
     try {
-        github.getRepository(repo).getBranches().containsKey(branch)
+        github.getRepository(fullRepoName).getBranches().containsKey(branch)
     } catch (FileNotFoundException e) {
         logger.debug("Failed to find repo!", e)
         return false
     }
 }
 
-
-def List<String> getReposFrom(String startRepo) {
-    def startRepoIdx = ALL_REPOS.findIndexOf { repo -> repo == startRepo }
-    if (startRepoIdx == -1) {
-        throw new IllegalArgumentException("Start repository '$startRepo' not recognized!")
+def List<String> getUpstreamRepos(String repo) {
+    def repoIdx = ALL_REPOS.findIndexOf { it == repo }
+    if (repoIdx == -1) {
+        throw new IllegalArgumentException("Repository '$repo' not found in the repository list!")
     }
-    ALL_REPOS.subList(startRepoIdx, ALL_REPOS.size() - 1)
-}
-
-def String getDefaultOrgUnitForRepo(String repo) {
-    if (repo.startsWith("uberfire")) {
-        return "uberfire"
-    } else if (repo.startsWith("dashbuilder")) {
-        return "dashbuilder"
-    } else {
-        return "droolsjbpm"
-    }
+    ALL_REPOS.subList(0, repoIdx)
 }
